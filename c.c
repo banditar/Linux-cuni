@@ -1,85 +1,111 @@
 #include <stdio.h>
-#include <poll.h>
 #include <stdlib.h>
-#include <time.h>
+#include <assert.h>
+#include <string.h>
 
-void six()
+struct elem
 {
-				int i, n = 20;
-				for( i = 0; i < n; i++ )
-								(void)printf("-");
-				putchar("\n");
+				int val;
+				struct elem *next;
+};
+
+void print_argv( char **argv )
+{
+				if( *argv != NULL )
+				{
+								printf("%s\n", *argv);
+								argv++;
+								print_argv( argv );
+				}
 }
 
 int main( int argc, char **argv )
 {
-				char **Argv = argv;
-				//1
-				int i;
-				printf("1.Print args:\n");
-				for( i = 0; i < argc; i++ )
-								printf("%s\t", argv[i]);
-				//2
-				printf("\n2.No brackets\n");
-				for( i = 0; i < argc; i++ )
-								printf("%s\t", *(argv + i));
-				//3
-				printf("\n3.No local variables\n");
-				while( argc > 0 )
-								printf("%s\t", *(argv+(argc--)-1));
-				//4
-				printf("\n4.Not using argc\n");
-				while( *argv != NULL )
-								printf("%s\t", *argv++);
-				printf("\n");
-				//5 STAR
-				printf("\n5.Moving star\n");
-				int k, n = 20, sleep = 20, j, times = 1;
-				for( k = 0; k < times; k++ )	//x times
-				{
-								for( i = 0; i < n; i++ )
-								{
-												for( j = 0; j < i; j++ )
-																printf(" ");
-												printf("*");
-												printf("\r");				//carriage return
-												fflush(stdout);
-												poll(NULL, 0, sleep);	//Sleep
-								}
-								for( j = 0; j <= i; j++ )
-												printf(" ");//delete the star
-								printf("\r");
-								fflush(stdout);
+				//1 pointer to self
+				void *p = &p;
 
-								for( i = 0; i < n; i++ )
-								{
-												for( j = 0; j < n - i - 1; j++ )
-																printf(" ");//backwards
-												printf("*");
-												printf("\r");
-												fflush(stdout);
-												poll(NULL, 0, sleep);
-										
-												for( j = 0; j <= n - i - 1; j++ )
-																printf(" ");//delete star
-												printf("\r");
-												fflush(stdout);
-								}
-				}
-				//6 Correct the code
-				six();
-				//7 second character of args
-				argv = Argv;
-				printf("\n7.2nd char of args:\n");
-				while( *argv != NULL )
+				printf("1.\nAddress of the pointer: %p\nValue of the pointer: %p\n\n", &p, p );
+
+
+				//2 print args
+				printf("2.\nNumber of arguments: %d\nArguments:\n", argc);
+				
+				//while
+				printf("using while loop\n");
+				int i = 0;
+				while( i < argc )
 				{
-								printf("%c\t", **argv+1);
-								argv++;
+								printf("%s\n", argv[i]);
+								i++;
+				}
+				
+				//for
+				printf("\nusing for loop\n");
+				
+				for( i = 0; i < argc; i++ )
+								printf("%s\n", argv[i]);
+
+				//recursion
+				printf("\nusing recursion\n");
+				print_argv(argv);
+				
+				//3 detect endianness
+				short x = 0x1234;
+				if( *(char *)&x == 0x34 )
+								printf("\n3.\nLittle Endian\n\n");
+				else
+								printf("\n3.\nBig Endian\n\n");
+				
+				//4 penultimate line of stdin
+				char *s[3];
+				s[0] = (char*)malloc(100*sizeof(char));
+				s[1] = (char*)malloc(100*sizeof(char));
+				s[2] = (char*)malloc(100*sizeof(char));
+
+				int len = 0;
+				int k = 0;
+				while( (len = getline(&s[2], &len, stdin)) > 1 )
+				{
+								if( k > 0 )
+												strcpy(s[0],s[1]);
+								strcpy(s[1],s[2]);
+								k++;
+				}
+				if( k > 0 )
+								printf("4.\nPenultimate line:\n%s\n", s[0]);
+				else
+								printf("4.\nNo penultimate line\n\n");
+
+				free(s[0]);
+				free(s[1]);
+				free(s[2]);
+
+				//5 argv linked list
+				
+				printf("5\nArgument list:\n");
+				struct elem *head = NULL;
+				for( i = 1; i < argc; i++ )
+				{
+								struct elem *cur = (struct elem*)malloc(sizeof(struct elem));
+								cur->val = atoi(argv[i]);
+								cur->next = head;
+								head = cur;
+				}
+
+				struct elem *temp = head;
+				while( temp != NULL )
+				{
+								printf("%d ", temp->val);
+								temp = temp->next;
+				}
+
+				while( head != NULL )
+				{
+								temp = head;
+								head = head->next;
+								free( temp );
 				}
 				printf("\n");
-				//8 mountain generator
-				int t[10][20] = { 0 };	//0 |1/|2\|3_
-				srand(time(NULL));
-				printf("%d\n", rand());
+
 				return 0;
 }
