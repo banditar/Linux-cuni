@@ -1,0 +1,5 @@
+cc -rpath=...
+readelf -d ./main
+ldd main //dependencies
+nm ./libstat.so
+runpath-et allitani hogy hol keresse a linker a libraryt
