@@ -1,4 +1,13 @@
 #include "headers.h"
+#define ARG_MAX 2097152
+
+struct entry {
+    char command[ARG_MAX];
+    STAILQ_ENTRY(entry)
+    entries;
+} *p;
+STAILQ_HEAD(stailhead, entry) head = STAILQ_HEAD_INITIALIZER(head);
+
 
 /*
  * returns the first CMD from buf.
@@ -38,16 +47,35 @@ char errorCheck(char *buf) {
         return (';');
     }
 
+    if (buf[0] == '|' || buf[strlen(buf) - 1] == '|') {
+        return ('|');
+    }
+
+    if (strstr(buf, ">>>") != NULL || strstr(buf, "<>") != NULL || strstr(buf, "><") != NULL) {
+        return ('>');
+    }
+
+    if (strstr(buf, "<<") != NULL) {
+        return ('<');
+    }
+
     int i = 1;
     int colon = 0;
+    int pipe = 0;
     while (buf[i] != '\0') {
         if (buf[i] == ';') {
             colon++;
             if (colon > 1) {
                 return (';');
             }
+        } else if (buf[i] == '|') {
+            pipe++;
+            if (pipe > 1) {
+                return ('|');
+            }
         } else if (buf[i] != ' ') {
             colon = 0;
+            pipe = 0;
         }
         i++;
     }
@@ -187,21 +215,198 @@ int builtins(char buf[], int row) {
     return (2);
 }
 
+/* boolean if pipe is present */
+int pipe_bool = 0;
+/* last command's pid in the pipe */
+int last_pid = 0;
+/* bool: if SIGINT was present in pipe */
+int killed = 0;
+
 /*
  * SIGINT signal handler for processes
  */
 void sigint_process_handler(int sig) {
     fprintf(stderr, "Killed by signal 2.\n");
-    EXIT_VALUE = 130;
+    if (pipe_bool == 0) {
+        EXIT_VALUE = 130;
+    } else {
+        killed = 1;
+    }
     (void) sig;        // silence the cc
     int wstatus;
     wait(&wstatus);
 }
 
 /*
+ * Constructs the argument list for the execvp
+ */
+void arglist(char *buf, char *args[]) {
+    int i = 0;
+    int nxtSpace = firstSeparator(buf, ' ');
+    while (buf[nxtSpace] != '\0') {
+        // first CMD before space
+        args[i] = nextCMD(buf, ' ');
+        // skip this CMD
+        buf += nxtSpace + 1;
+        i++;
+        nxtSpace = firstSeparator(buf, ' ');
+    }
+    args[i] = buf;
+    i++;
+    args[i] = NULL;
+}
+
+/*
+ * Checks for redirections.
+ * Opens the fileDescriptors.
+ * dup2()-licates them, and closes them
+ */
+void
+redirect(char *buf, int row) {
+    // fd for input and output
+    int fdin, fdout;
+    // booleans
+    int input = 0, output = 0, append = 0;
+    // iterators
+    int ini = 0, outi = 0;
+    int LEN = strlen(buf);
+    char IN[LEN], OUT[LEN];
+    IN[0] = '\0';
+    OUT[0] = '\0';
+
+    // buf iterator
+    long unsigned int i = 0;
+    // line iterator
+    long unsigned int j = 0;
+
+
+    while (i < strlen(buf)) {
+        if (buf[i] == '<') {
+            // INPUT
+            input = 1;
+            ini = 0;
+            // skip the <
+            i++;
+
+            while (i < strlen(buf) && buf[i] == ' ') {
+                i++;
+            }
+            if (i < strlen(buf)) {
+                // not error
+                while (buf[i] != '\0'
+                       && buf[i] != ' '
+                       && buf[i] != '<'
+                       && buf[i] != '>') {
+                    // until string
+                    // copy string into IN
+                    IN[ini] = buf[i];
+                    ini++;
+                    i++;
+                }
+            }
+            IN[ini] = '\0';
+        }
+        if (buf[i] == '>') {
+            if (buf[i + 1] == '>') {
+                // APPEND
+                append = 1;
+                output = 0;
+                outi = 0;
+                // skip the >>
+                i += 2;
+
+                while (i < strlen(buf) && buf[i] == ' ') {
+                    i++;
+                }
+                if (i < strlen(buf)) {
+                    // not error
+                    while (buf[i] != '\0'
+                           && buf[i] != ' '
+                           && buf[i] != '<'
+                           && buf[i] != '>') {
+                        // until string
+                        // copy string into OUT
+                        OUT[outi] = buf[i];
+                        outi++;
+                        i++;
+                    }
+                }
+                OUT[outi] = '\0';
+            } else {
+                // OUTPUT
+                output = 1;
+                append = 0;
+                outi = 0;
+                // skip the >
+                i++;
+
+                while (strlen(buf) > i && buf[i] == ' ') {
+                    i++;
+                }
+                if (i < strlen(buf)) {
+                    // not error
+                    while (buf[i] != '\0'
+                           && buf[i] != ' '
+                           && buf[i] != '<'
+                           && buf[i] != '>') {
+                        // until string
+                        // copy string into OUT
+                        OUT[outi] = buf[i];
+                        outi++;
+                        i++;
+                    }
+                }
+                OUT[outi] = '\0';
+            }
+        } else {
+            buf[j] = buf[i];
+            i++;
+            j++;
+        }
+    }
+    buf[j] = '\0';
+
+    // opening fd-s
+    if (input == 1 && strlen(IN) > 0) {
+        if ((fdin = open(IN, O_RDONLY)) < 0) {
+            if (row == 0) {
+                fprintf(stderr, "mysh: %s: No such file or directory\n", IN);
+            } else {
+                fprintf(stderr, "error:%d: %s: No such file or directory\n", row, IN);
+            }
+        }
+        if (dup2(fdin, 0) < 0) {
+            fprintf(stderr, "Error dup2 IN: '%s'\n", IN);
+        }
+        close(fdin);
+    }
+    if (output == 1 && strlen(OUT) > 0) {
+        if ((fdout = open(OUT, O_WRONLY | O_CREAT, 0666)) < 0) {
+            fprintf(stderr, "Error opening OUT: '%s'\n", OUT);
+        }
+        if (dup2(fdout, 1) < 0) {
+            fprintf(stderr, "Error dup2 OUT: '%s'\n", OUT);
+        }
+
+        close(fdout);
+    }
+    if (append == 1 && strlen(OUT) > 0) {
+        if ((fdout = open(OUT, O_WRONLY | O_CREAT | O_APPEND, 0666)) < 0) {
+            fprintf(stderr, "Error opening APPEND: '%s'\n", OUT);
+        }
+        if (dup2(fdout, 1) < 0) {
+            fprintf(stderr, "Error dup2 APPEND: '%s'\n", OUT);
+        }
+
+        close(fdout);
+    }
+}
+
+/*
  * Executes the cmd given from the parse() function
  */
 int execute(char *buf, int row) {
+    pipe_bool = 0;
     int ret = builtins(buf, row);
     if (ret == 2) {
         // not 'exit' nor 'cd'
@@ -223,21 +428,11 @@ int execute(char *buf, int row) {
         if (p == 0) { // child
             // sigaction(SIGINT, &sa, NULL);
             sigprocmask(SIG_SETMASK, &osigs, NULL);
-            char *args[1024];
-            int i = 0;
-            int nxtSpace = firstSeparator(buf, ' ');
-            while (buf[nxtSpace] != '\0') {
-                // first CMD before space
-                args[i] = nextCMD(buf, ' ');
-                // skip this CMD
-                buf += nxtSpace + 1;
-                i++;
-                nxtSpace = firstSeparator(buf, ' ');
-            }
-            args[i] = buf;
-            i++;
-            args[i] = NULL;
+            // check for redirections
+            redirect(buf, row);
 
+            char *args[1024];
+            arglist(trim(buf), args);
             if (execvp(args[0], args) < 0) {
                 EXIT_VALUE = 127;
                 if (row == 0) {
@@ -257,6 +452,255 @@ int execute(char *buf, int row) {
         EXIT_VALUE = WEXITSTATUS(wstatus);
         return (EXIT_VALUE);
     }
+    return (ret);
+}
+
+
+/*
+ * Checks what's in the Q. For debugging
+ */
+void
+checkQ() {
+    int i = 0;
+    while (!STAILQ_EMPTY(&head)) {
+        p = STAILQ_FIRST(&head);
+        printf("pipe#%d: '%s'\n", i, p->command);
+        i++;
+        STAILQ_REMOVE_HEAD(&head, entries);
+        free(p);
+    }
+}
+
+/*
+ * tokenizes the pipes and execs them
+ */
+int exec_pipe(char *buf, int row) {
+    pipe_bool = 1;
+    if (buf[0] == '|' || buf[strlen(buf) - 1] == '|') {
+        /* if syntax error */
+        if (row == 0) {
+            fprintf(stderr, "syntax error near unexpected token '%c'\n", '|');
+        } else {
+            errx(254, "error:%d: syntax error near unexpected token '%c'", row, '|');
+        }
+        EXIT_VALUE = 254;
+        return (254);
+    }
+
+    STAILQ_INIT(&head);
+
+    /* count how many commands in the expression */
+    int n = 0;
+    char *line;
+    int ret = 0;
+    int nxtCommand = firstSeparator(buf, '|');
+    while (buf[nxtCommand] != '\0') {
+        line = nextCMD(buf, '|');
+        p = malloc(sizeof(struct entry));
+        strcpy(p->command, trim(line));
+        STAILQ_INSERT_TAIL(&head, p, entries);
+        n++;
+
+        /* skip this command + one |*/
+        buf += nxtCommand + 1;
+        if (buf[0] == ' ') {
+            /* skip space */
+            buf++;
+        }
+
+        nxtCommand = firstSeparator(buf, '|');
+    }
+
+    p = malloc(sizeof(struct entry));
+    strcpy(p->command, trim(buf));
+    STAILQ_INSERT_TAIL(&head, p, entries);
+    n++;
+
+    sigset_t sigs, osigs;
+    struct sigaction sa;
+    sigfillset(&sigs);
+    sigprocmask(SIG_BLOCK, &sigs, &osigs);
+    sa.sa_handler = sigint_process_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+
+    /* make the pipes */
+    int **pip = (int **) malloc((n - 1) * sizeof(int *));
+
+    // n child. (n - 1) pipes
+    for (int i = 0; i < n - 1; i++) {
+        pip[i] = (int *) malloc(2 * sizeof(int));
+        if (pipe(pip[i]) < 0) {
+            errx(1, "pipe error");
+        }
+    }
+
+    int pid = fork();
+    if (pid < 0) {
+        errx(1, "fork error");
+    }
+    if (pid == 0) {
+        // first child
+        for (int i = 1; i < n - 1; i++) {
+            close(pip[i][0]);
+            close(pip[i][1]);
+        }
+        if (n > 1) {
+            close(pip[0][0]);
+        }
+        if (n > 1) {
+            if (dup2(pip[0][1], 1) < 0) {
+                errx(1, "dup2 error");
+            }
+            close(pip[0][1]);
+        }
+
+        /* get the command out of the pipe */
+        p = STAILQ_FIRST(&head);
+
+        sigprocmask(SIG_SETMASK, &osigs, NULL);
+
+        // check for redirections
+        redirect(p->command, row);
+
+        char *args[1024];
+        arglist(trim(p->command), args);
+
+        if (execvp(args[0], args) < 0) {
+            EXIT_VALUE = 127;
+            if (row == 0) {
+                errx(127, "%s: command not found", p->command);
+            } else {
+                errx(127, "error:%d: %s: command not found", row, p->command);
+            }
+        }
+        free(p);
+        exit(ret);
+    }
+
+    for (int i = 1; i < n - 1; i++) {
+        if ((pid = fork()) < 0) {
+            errx(1, "fork error");
+        }
+        if (pid == 0) {
+            // child
+            for (int j = 0; j < n - 1; j++) {
+                if (j != i) {
+                    close(pip[j][1]);
+                } else if (j != i - 1) {
+                    close(pip[j][0]);
+                }
+            }
+            if (dup2(pip[i - 1][0], 0) < 0) {
+                errx(1, "dup2 error%d", i);
+            }
+            close(pip[i - 1][0]);
+
+            if (dup2(pip[i][1], 1) < 0) {
+                errx(1, "dup2 error%d", i);
+            }
+            close(pip[i][1]);
+
+            /* get the command out of the pipe */
+            for (int k = 0; k < i; k++) {
+                p = STAILQ_FIRST(&head);
+                STAILQ_REMOVE_HEAD(&head, entries);
+                free(p);
+            }
+            p = STAILQ_FIRST(&head);
+
+            sigprocmask(SIG_SETMASK, &osigs, NULL);
+
+            // check for redirections
+            redirect(p->command, row);
+
+            char *args[1024];
+            arglist(trim(p->command), args);
+
+            if (execvp(args[0], args) < 0) {
+                EXIT_VALUE = 127;
+                if (row == 0) {
+                    errx(127, "%s: command not found", p->command);
+                } else {
+                    errx(127, "error:%d: %s: command not found", row, p->command);
+                }
+            }
+
+            fprintf(stderr, "%s executed: %d\n", p->command, ret);
+            free(p);
+            exit(ret);
+        }
+    }
+
+    if (n > 1) {
+        if ((pid = fork()) < 0) {
+            errx(1, "fork error Last");
+        }
+        last_pid = pid;
+        if (pid == 0) {
+            // last child
+            for (int i = 0; i < n - 1; i++) {
+                if (i != n - 2) {
+                    close(pip[i][0]);
+                }
+                close(pip[i][1]);
+            }
+
+            if (dup2(pip[n - 2][0], 0) < 0) {
+                errx(1, "dup2 errorLast");
+            }
+            close(pip[n - 2][0]);
+
+            /* get the commands out of the pipe */
+            for (int k = 0; k < n - 1; k++) {
+                p = STAILQ_FIRST(&head);
+                STAILQ_REMOVE_HEAD(&head, entries);
+                free(p);
+            }
+            p = STAILQ_FIRST(&head);
+
+            sigprocmask(SIG_SETMASK, &osigs, NULL);
+
+            // check for redirections
+            redirect(p->command, row);
+
+            char *args[1024];
+            arglist(trim(p->command), args);
+
+            if (execvp(args[0], args) < 0) {
+                EXIT_VALUE = 127;
+                if (row == 0) {
+                    errx(127, "%s: command not found", p->command);
+                } else {
+                    errx(127, "error:%d: %s: command not found", row, p->command);
+                }
+            }
+
+            free(p);
+            exit(ret);
+        }
+    }
+
+    for (int i = 0; i < n - 1; i++) {
+        close(pip[i][0]);
+        close(pip[i][1]);
+    }
+
+    sigprocmask(SIG_SETMASK, &osigs, NULL);
+    sigaction(SIGINT, &sa, NULL);
+
+    int wstatus;
+    if (waitpid(pid, &wstatus, 0) < 0) {
+        /* SIGINT-ed */
+        EXIT_VALUE = 130;
+        ret = EXIT_VALUE;
+    } else {
+        ret = WEXITSTATUS(wstatus);
+        EXIT_VALUE = ret;
+    }
+
+    while (wait(&wstatus) >= 0);
+
     return (ret);
 }
 
@@ -290,7 +734,16 @@ int parse(char *line, int row) {
         buf = nextCMD(line, ';');
 
         /* where execvp is */
-        ret = execute(trim(buf), row);
+        if (strchr(buf, '|') != NULL) {
+            killed = 0;
+            ret = exec_pipe(trim(buf), row);
+            if (killed == 1) {
+                /* i.e. SIGINT-ed in pipe */
+                return (ret);
+            }
+        } else {
+            ret = execute(trim(buf), row);
+        }
 
         if (ret == 130) {
             /* killed by SIGINT */
@@ -308,7 +761,11 @@ int parse(char *line, int row) {
         nxtColon = firstSeparator(line, ';');
     }
 
-    ret = execute(trim(line), row);
+    if (strchr(line, '|') != NULL) {
+        ret = exec_pipe(trim(line), row);
+    } else {
+        ret = execute(trim(line), row);
+    }
     return (ret);
 }
 
@@ -317,11 +774,11 @@ int parse(char *line, int row) {
  */
 void
 sigint_readline_handler(int sig) {
-    printf("\n");                    // Move to a new line
-    rl_on_new_line();            // Regenerate the prompt on a newline
+    printf("\n");           // Move to a new line
+    rl_on_new_line();       // Regenerate the prompt on a newline
     rl_replace_line("", 0); // Clear the previous text
     rl_redisplay();
-    (void) sig;                            // To silence the cc
+    (void) sig;             // To silence the cc
 }
 
 int
@@ -342,7 +799,7 @@ main(int argc, char **argv) {
         if ((fd = open(argv[1], O_RDONLY)) == -1) {
             errx(127, "%s: No such file or directory", argv[1]);
         }
-        int ARG_MAX = 2097152;
+        // int ARG_MAX = 2097152;
         int nrBytesRead = 1;
         int r;
         char *buf2 = (char *) malloc(ARG_MAX * sizeof(char));
@@ -387,7 +844,9 @@ main(int argc, char **argv) {
 
             buf = readline(line);
             if (buf != NULL) {
-                add_history(buf);
+                if (strlen(buf) > 0) {
+                    add_history(buf);
+                }
                 char *buf2 = trim(buf);
                 if (strlen(buf2) > 0) {
                     ret = parse(buf2, 0);
