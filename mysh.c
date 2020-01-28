@@ -160,6 +160,16 @@ int builtins(char buf[], int row) {
         if (strlen(buf) <= 2) {
             /* cd goes to home */
             pwd = getenv("HOME");
+            if (pwd == NULL) {
+                /* no $HOME */
+                if (row == 0) {
+                    fprintf(stderr, "mysh: cd: HOME not set\n");
+                } else {
+                    fprintf(stderr, "mysh: error:%d: cd: HOME not set\n", row);
+                }
+                EXIT_VALUE = 1;
+                return (1);
+            }
         } else if (buf[3] == '-') {
             /* cd goes back one dir */
             pwd = getenv("OLDPWD");
@@ -172,6 +182,8 @@ int builtins(char buf[], int row) {
                 }
                 EXIT_VALUE = 1;
                 return (1);
+            } else {
+                printf("%s\n", pwd);
             }
         } else {
             pwd = buf + 3;
@@ -199,8 +211,10 @@ int builtins(char buf[], int row) {
         }
 
         /* setOLDPWD */
-        if (setenv("OLDPWD", oldpwd, 1) < 0) {
-            errx(1, "SetOLDPWD error");
+        if (oldpwd != NULL) {
+            if (setenv("OLDPWD", oldpwd, 1) < 0) {
+                errx(1, "SetOLDPWD error");
+            }
         }
 
         /* setPWD */
@@ -783,7 +797,7 @@ sigint_readline_handler(int sig) {
 
 int
 main(int argc, char **argv) {
-    int ret;
+    int ret = 0;
     int c = getopt(argc, argv, "c:");
     if (c != -1) {
         /* OPTION -c */
